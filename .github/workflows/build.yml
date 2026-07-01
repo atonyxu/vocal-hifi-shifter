@@ -20,9 +20,9 @@ on:
 
 env:
   BUILD_TYPE: Release
-  ORT_VERSION: "1.24.3"
+  ORT_VERSION: "1.20.1"
   TENSORRT_VERSION: "10.7.0"
-  CUDA_VERSION: "12.6"
+  CUDA_VERSION: "12.6.3"
 
 jobs:
   # ===========================================
@@ -42,15 +42,15 @@ jobs:
           cuda: ${{ env.CUDA_VERSION }}
           method: network
 
-      - name: Download ONNX Runtime (GPU/CUDA, contains TensorRT EP)
+      - name: Download ONNX Runtime (GPU/CUDA 12, contains TensorRT EP)
         shell: pwsh
         run: |
-          $url = "https://github.com/microsoft/onnxruntime/releases/download/v${{ env.ORT_VERSION }}/onnxruntime-win-x64-gpu_cuda13-${{ env.ORT_VERSION }}.zip"
+          $url = "https://github.com/microsoft/onnxruntime/releases/download/v${{ env.ORT_VERSION }}/onnxruntime-win-x64-gpu-${{ env.ORT_VERSION }}.zip"
           Invoke-WebRequest -Uri $url -OutFile ort.zip
           Expand-Archive -Path ort.zip -DestinationPath $env:GITHUB_WORKSPACE/ort -Force
-          # Resolve versioned subfolder, e.g. ort/onnxruntime-win-x64-gpu_cuda13-1.24.3
+          # Resolve versioned subfolder, e.g. ort/onnxruntime-win-x64-gpu-1.20.1
           $ortRoot = (Get-ChildItem -Directory $env:GITHUB_WORKSPACE/ort/onnxruntime-* | Select-Object -First 1).FullName
-          Write-Host "ORT_ROOT=$ortRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "ORT_ROOT=$ortRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
           Get-ChildItem $ortRoot/lib
 
       - name: Download TensorRT
@@ -151,9 +151,9 @@ jobs:
           cuda: ${{ env.CUDA_VERSION }}
           method: network
 
-      - name: Download ONNX Runtime (GPU/CUDA, contains TensorRT EP)
+      - name: Download ONNX Runtime (GPU/CUDA 12, contains TensorRT EP)
         run: |
-          url="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-gpu_cuda13-${ORT_VERSION}.tgz"
+          url="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-gpu-${ORT_VERSION}.tgz"
           wget -q -O ort.tgz "$url"
           mkdir -p ort && tar xzf ort.tgz -C ort --strip-components=1
           # ort/ now has include/ and lib/ directly.

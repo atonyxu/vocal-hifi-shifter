@@ -16,7 +16,7 @@ option(USE_TENSORRT "Enable TensorRT execution provider (requires ONNXRuntime GP
 option(STATIC_LINK "Statically link ONNXRuntime (needs a custom static ORT build)" OFF)
 option(ORT_FROM_SOURCE_DIR "Use a pre-built ONNXRuntime source dir (set ORT_ROOT)" OFF)
 set(ORT_ROOT "" CACHE PATH "Path to a pre-extracted ONNXRuntime package (root with include/ and lib/)")
-set(ORT_VERSION "1.24.3" CACHE STRING "ONNX Runtime version to auto-download")
+set(ORT_VERSION "1.20.1" CACHE STRING "ONNX Runtime version to auto-download")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
