@@ -1,69 +1,36 @@
-# Prerequisites
-*.d
+# Build directories
+/build/
+/build-*/
+/out/
 
-# Compiled Object files
-*.slo
-*.lo
+# Compiled objects
 *.o
 *.obj
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Linker files
-*.ilk
-
-# Debugger Files
-*.pdb
-
-# Compiled Dynamic libraries
+*.exe
+*.dll
 *.so
 *.dylib
-*.dll
-*.so.*
-
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
 *.a
 *.lib
 
-# Executables
-*.exe
-*.out
-*.app
+# IDE / OS files
+.vscode/
+.idea/
+*.user
+.DS_Store
+Thumbs.db
 
-# Build directories
-build/
-Build/
-build-*/
+# Models not used by hifishifter (kept locally but excluded from repo).
+# hifishifter only needs: pc_nsf_hifigan.onnx, fcpe.onnx,
+# cent_table.bin, mel_filterbank.bin.
+/models/rmvpe.onnx
+/models/GAME/
 
-# CMake generated files
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-Makefile
-install_manifest.txt
-compile_commands.json
-
-# Temporary files
-*.tmp
-*.log
-*.bak
-*.swp
-
-# vcpkg
-vcpkg_installed/
-
-# debug information files
-*.dwo
-
-# test output & cache
-Testing/
-.cache/
+# CI downloaded artifacts
+/ort/
+/trt/
+/ort.zip
+/ort.tgz
+/trt.zip
+/trt.tgz
+/package/

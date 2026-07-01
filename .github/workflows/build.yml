@@ -1,0 +1,265 @@
+name: Build hifishifter
+
+# 模仿 HachiTune 的 CI 流水线。生成 TensorRT 版的 Windows x64 与 Linux x64
+# 分发包：动态链接 ONNXRuntime GPU 包（内置 TensorRT EP），并把所有运行时
+# 依赖（ORT / TensorRT / CUDA runtime）打包到与 hifishifter 可执行文件同一
+# 目录，得到开箱即用的分发包。
+#
+# 说明：真正的"单一二进制静态文件"在 TensorRT 场景下不可行 —— TensorRT
+# 本身只以共享库形式发布（libnvinfer.so / nvinfer.dll），无法静态链接。
+# 因此本流水线采用与 HachiTune 相同的"动态链接 + 同目录打包"方案。
+
+on:
+  push:
+    branches: [main, master]
+    tags:
+      - "v*"
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  BUILD_TYPE: Release
+  ORT_VERSION: "1.24.3"
+  TENSORRT_VERSION: "10.7.0"
+  CUDA_VERSION: "12.6"
+
+jobs:
+  # ===========================================
+  # Windows x64 Build (TensorRT)
+  # ===========================================
+  build-windows:
+    runs-on: windows-latest
+    name: Windows x64 (TensorRT)
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.21
+        with:
+          cuda: ${{ env.CUDA_VERSION }}
+          method: network
+
+      - name: Download ONNX Runtime (GPU/CUDA, contains TensorRT EP)
+        shell: pwsh
+        run: |
+          $url = "https://github.com/microsoft/onnxruntime/releases/download/v${{ env.ORT_VERSION }}/onnxruntime-win-x64-gpu_cuda13-${{ env.ORT_VERSION }}.zip"
+          Invoke-WebRequest -Uri $url -OutFile ort.zip
+          Expand-Archive -Path ort.zip -DestinationPath $env:GITHUB_WORKSPACE/ort -Force
+          # Resolve versioned subfolder, e.g. ort/onnxruntime-win-x64-gpu_cuda13-1.24.3
+          $ortRoot = (Get-ChildItem -Directory $env:GITHUB_WORKSPACE/ort/onnxruntime-* | Select-Object -First 1).FullName
+          Write-Host "ORT_ROOT=$ortRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Get-ChildItem $ortRoot/lib
+
+      - name: Download TensorRT
+        shell: pwsh
+        run: |
+          # TensorRT 10 GA public tarball (NVIDIA dev zone mirror via cgr mirror).
+          $trtUrl = "https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.7.0/TensorRT-10.7.0.23.Windows10.x86_64.cuda-12.6.zip"
+          Invoke-WebRequest -Uri $trtUrl -OutFile trt.zip
+          Expand-Archive -Path trt.zip -DestinationPath $env:GITHUB_WORKSPACE/trt -Force
+          $trtRoot = (Get-ChildItem -Directory $env:GITHUB_WORKSPACE/trt/TensorRT-* | Select-Object -First 1).FullName
+          Write-Host "TRT_ROOT=$trtRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Get-ChildItem $trtRoot/lib
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          cmake -B build -G "Ninja" `
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
+            -DUSE_TENSORRT=ON `
+            -DSTATIC_LINK=OFF `
+            -DORT_ROOT="$env:ORT_ROOT"
+
+      - name: Build
+        run: cmake --build build --config ${{ env.BUILD_TYPE }} --parallel
+
+      - name: Prepare Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path package
+          # Copy hifishifter binary + models directory (created by post-build step).
+          Copy-Item -Path "build/hifishifter.exe" -Destination "package/" -Force
+          Copy-Item -Path "build/models" -Destination "package/" -Recurse -Force
+
+          # ONNXRuntime DLL (auto-copied by CMake post-build; verify).
+          $ortDll = Join-Path $env:ORT_ROOT "lib/onnxruntime.dll"
+          if (Test-Path $ortDll) {
+            Copy-Item -Path $ortDll -Destination "package/" -Force
+          }
+          # cudnn DLLs (shipped with the ORT GPU package).
+          $cudnnDlls = Get-ChildItem -Path (Join-Path $env:ORT_ROOT "lib/cudnn*.dll") -ErrorAction SilentlyContinue
+          foreach ($d in $cudnnDlls) { Copy-Item -Path $d.FullName -Destination "package/" -Force }
+
+          # TensorRT runtime DLLs.
+          $trtDlls = Get-ChildItem -Path (Join-Path $env:TRT_ROOT "lib/nvinfer*.dll") -ErrorAction SilentlyContinue
+          foreach ($d in $trtDlls) { Copy-Item -Path $d.FullName -Destination "package/" -Force }
+
+          # CUDA runtime DLLs (cudart, cublas, etc.).
+          $cudaBin = Join-Path $env:CUDA_PATH "bin"
+          $cudaDlls = @(
+            "cudart64_12.dll", "cublas64_12.dll", "cublasLt64_12.dll",
+            "cufft64_11.dll", "curand64_10.dll", "cusolver64_11.dll",
+            "cusparse64_12.dll", "cudnn64_9.dll", "cudnn_graph64_9.dll",
+            "cudnn_engines_precompiled64_9.dll", "cudnn_heuristic64_9.dll",
+            "cudnn_ops64_9.dll", "cudnn_adv64_9.dll"
+          )
+          foreach ($dll in $cudaDlls) {
+            $p = Join-Path $cudaBin $dll
+            if (Test-Path $p) { Copy-Item -Path $p -Destination "package/" -Force }
+          }
+
+          # Optional launch helper script.
+          @"
+          @echo off
+          setlocal
+          set PATH=%~dp0;%PATH%
+          %~dp0hifishifter.exe %*
+          "@ | Out-File -FilePath "package/run.bat" -Encoding ascii
+
+          Write-Host "=== Package contents ==="
+          Get-ChildItem package | Format-Table Name, Length
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hifishifter-windows-x64
+          path: package/
+          retention-days: 30
+
+  # ===========================================
+  # Linux x64 Build (TensorRT)
+  # ===========================================
+  build-linux:
+    runs-on: ubuntu-22.04
+    name: Linux x64 (TensorRT)
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build wget unzip
+
+      - name: Setup CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.21
+        with:
+          cuda: ${{ env.CUDA_VERSION }}
+          method: network
+
+      - name: Download ONNX Runtime (GPU/CUDA, contains TensorRT EP)
+        run: |
+          url="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-gpu_cuda13-${ORT_VERSION}.tgz"
+          wget -q -O ort.tgz "$url"
+          mkdir -p ort && tar xzf ort.tgz -C ort --strip-components=1
+          # ort/ now has include/ and lib/ directly.
+          echo "ORT_ROOT=$PWD/ort" >> $GITHUB_ENV
+          ls -la ort/lib/
+
+      - name: Download TensorRT
+        run: |
+          trtUrl="https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.7.0/TensorRT-10.7.0.23.Linux.x86_64-gnu.cuda-12.6.tar.gz"
+          wget -q -O trt.tgz "$trtUrl"
+          mkdir -p trt && tar xzf trt.tgz -C trt --strip-components=1
+          echo "TRT_ROOT=$PWD/trt" >> $GITHUB_ENV
+          ls -la trt/lib/
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
+            -DUSE_TENSORRT=ON \
+            -DSTATIC_LINK=OFF \
+            -DORT_ROOT="${ORT_ROOT}"
+
+      - name: Build
+        run: cmake --build build --config ${BUILD_TYPE} --parallel
+
+      - name: Prepare Package
+        run: |
+          mkdir -p package
+          cp build/hifishifter package/
+          cp -R build/models package/
+
+          # ONNXRuntime shared library.
+          cp ${ORT_ROOT}/lib/libonnxruntime.so* package/
+
+          # TensorRT runtime libs.
+          cp ${TRT_ROOT}/lib/libnvinfer.so* package/ 2>/dev/null || true
+          cp ${TRT_ROOT}/lib/libnvinfer_plugin.so* package/ 2>/dev/null || true
+
+          # CUDA runtime libs.
+          CUDA_LIB=${CUDA_PATH}/lib64
+          [ -d "$CUDA_LIB" ] || CUDA_LIB=${CUDA_PATH}/lib
+          for lib in libcudart.so libcublas.so libcublasLt.so libcufft.so \
+                      libcurand.so libcusolver.so libcusparse.so; do
+            for f in $(ls $CUDA_LIB/${lib}* 2>/dev/null); do
+              cp $f package/ 2>/dev/null || true
+            done
+          done
+
+          # cuDNN (not strictly required for TensorRT EP, but commonly bundled).
+          for lib in libcudnn.so libcudnn_graph.so libcudnn_ops.so \
+                      libcudnn_engines_precompiled.so libcudnn_heuristic.so \
+                      libcudnn_adv.so; do
+            for f in $(find / -name "${lib}*" 2>/dev/null | head -1); do
+              cp $f package/ 2>/dev/null || true
+            done
+          done
+
+          # Launch wrapper: sets LD_LIBRARY_PATH next to the binary.
+          cat > package/run.sh << 'EOF'
+          #!/bin/bash
+          SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          export LD_LIBRARY_PATH="$SCRIPT_DIR:$LD_LIBRARY_PATH"
+          exec "$SCRIPT_DIR/hifishifter" "$@"
+          EOF
+          chmod +x package/run.sh
+
+          echo "=== Package contents ==="
+          ls -la package/
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hifishifter-linux-x64
+          path: package/
+          retention-days: 30
+
+  # ===========================================
+  # Release (only on tags v*)
+  # ===========================================
+  release:
+    name: Create Release
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create distributable archives
+        run: |
+          cd artifacts
+          (cd hifishifter-windows-x64 && zip -r ../hifishifter-windows-x64.zip .)
+          (cd hifishifter-linux-x64 && tar -czf ../hifishifter-linux-x64.tar.gz .)
+          ls -la
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/hifishifter-windows-x64.zip
+            artifacts/hifishifter-linux-x64.tar.gz
+          draft: true
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
