@@ -166,16 +166,7 @@ if(NOT STATIC_LINK AND WIN32)
     endforeach()
 endif()
 
-# -------------------------------------------------------------------
-# Copy the models directory next to the binary so it runs out of the box
-# (models are loaded from ./models by default).
-# -------------------------------------------------------------------
-add_custom_command(TARGET hifishifter POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:hifishifter>/models"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_CURRENT_SOURCE_DIR}/models/pc_nsf_hifigan.onnx"
-        "${CMAKE_CURRENT_SOURCE_DIR}/models/fcpe.onnx"
-        "${CMAKE_CURRENT_SOURCE_DIR}/models/cent_table.bin"
-        "${CMAKE_CURRENT_SOURCE_DIR}/models/mel_filterbank.bin"
-        "$<TARGET_FILE_DIR:hifishifter>/models/"
-    COMMENT "Copying models to output directory")
+# Note: models/ is NOT auto-copied — it is user-supplied. Place the ONNX
+# models (pc_nsf_hifigan.onnx, fcpe.onnx, cent_table.bin,
+# mel_filterbank.bin) in a ./models/ directory next to the executable
+# (or pass -m <dir> at runtime).

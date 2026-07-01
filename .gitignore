@@ -20,11 +20,8 @@
 .DS_Store
 Thumbs.db
 
-# Models not used by hifishifter (kept locally but excluded from repo).
-# hifishifter only needs: pc_nsf_hifigan.onnx, fcpe.onnx,
-# cent_table.bin, mel_filterbank.bin.
-/models/rmvpe.onnx
-/models/GAME/
+# Models — user-supplied, never committed to the repo.
+/models/
 
 # CI downloaded artifacts
 /ort/

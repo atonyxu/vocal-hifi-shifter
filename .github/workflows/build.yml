@@ -3,10 +3,12 @@ name: Build hifishifter
 # 模仿 HachiTune 的 CI 流水线。生成 TensorRT 版的 Windows x64 与 Linux x64
 # 分发包：动态链接 ONNXRuntime GPU 包（内置 TensorRT EP），并把所有运行时
 # 依赖（ORT / TensorRT / CUDA runtime）打包到与 hifishifter 可执行文件同一
-# 目录，得到开箱即用的分发包。
+# 目录，得到开箱即用的二进制分发包。
+#
+# models 目录不入仓库、不打包 —— 用户自行置入到二进制旁的 models/ 子目录。
 #
 # 说明：真正的"单一二进制静态文件"在 TensorRT 场景下不可行 —— TensorRT
-# 本身只以共享库形式发布（libnvinfer.so / nvinfer.dll），无法静态链接。
+# 本身只以共享库形式发布（libnvinfer.so / nvinfer_10.dll），无法静态链接。
 # 因此本流水线采用与 HachiTune 相同的"动态链接 + 同目录打包"方案。
 
 on:
@@ -21,8 +23,8 @@ on:
 env:
   BUILD_TYPE: Release
   ORT_VERSION: "1.20.1"
-  TENSORRT_VERSION: "10.7.0"
-  CUDA_VERSION: "12.6.3"
+  # ORT 1.20.x 的 TensorRT EP 动态加载 nvinfer 10.x 运行时库。
+  TRT_PIP_SPEC: "tensorrt==10.7.0"
 
 jobs:
   # ===========================================
@@ -36,11 +38,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup CUDA Toolkit
-        uses: Jimver/cuda-toolkit@v0.2.21
+      - name: Setup CUDA
+        uses: Jimver/cuda-toolkit@v0.2.35
         with:
-          cuda: ${{ env.CUDA_VERSION }}
-          method: network
+          cuda: '12.8.0'
+          use-github-cache: true
 
       - name: Download ONNX Runtime (GPU/CUDA 12, contains TensorRT EP)
         shell: pwsh
@@ -48,21 +50,20 @@ jobs:
           $url = "https://github.com/microsoft/onnxruntime/releases/download/v${{ env.ORT_VERSION }}/onnxruntime-win-x64-gpu-${{ env.ORT_VERSION }}.zip"
           Invoke-WebRequest -Uri $url -OutFile ort.zip
           Expand-Archive -Path ort.zip -DestinationPath $env:GITHUB_WORKSPACE/ort -Force
-          # Resolve versioned subfolder, e.g. ort/onnxruntime-win-x64-gpu-1.20.1
           $ortRoot = (Get-ChildItem -Directory $env:GITHUB_WORKSPACE/ort/onnxruntime-* | Select-Object -First 1).FullName
-          echo "ORT_ROOT=$ortRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ORT_ROOT=$ortRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
           Get-ChildItem $ortRoot/lib
 
-      - name: Download TensorRT
+      - name: Get TensorRT runtime libs (via PyPI wheel, no EULA needed)
         shell: pwsh
         run: |
-          # TensorRT 10 GA public tarball (NVIDIA dev zone mirror via cgr mirror).
-          $trtUrl = "https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.7.0/TensorRT-10.7.0.23.Windows10.x86_64.cuda-12.6.zip"
-          Invoke-WebRequest -Uri $trtUrl -OutFile trt.zip
-          Expand-Archive -Path trt.zip -DestinationPath $env:GITHUB_WORKSPACE/trt -Force
-          $trtRoot = (Get-ChildItem -Directory $env:GITHUB_WORKSPACE/trt/TensorRT-* | Select-Object -First 1).FullName
-          Write-Host "TRT_ROOT=$trtRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Get-ChildItem $trtRoot/lib
+          pip download ${{ env.TRT_PIP_SPEC }} --no-deps --only-binary :all: -d trt_wheel
+          $whl = (Get-ChildItem trt_wheel/tensorrt-*.whl | Select-Object -First 1).FullName
+          # .whl is a zip; extract the tensorrt/lib runtime DLLs.
+          Expand-Archive -Path $whl -DestinationPath trt_extract -Force
+          $trtRoot = "$env:GITHUB_WORKSPACE/trt_extract/tensorrt"
+          "TRT_ROOT=$trtRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "TensorRT runtime libs:"; Get-ChildItem $trtRoot/lib
 
       - name: Configure CMake
         shell: pwsh
@@ -80,38 +81,34 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path package
-          # Copy hifishifter binary + models directory (created by post-build step).
+          # hifishifter binary only — models are user-supplied.
           Copy-Item -Path "build/hifishifter.exe" -Destination "package/" -Force
-          Copy-Item -Path "build/models" -Destination "package/" -Recurse -Force
 
-          # ONNXRuntime DLL (auto-copied by CMake post-build; verify).
+          # ONNXRuntime DLL (auto-copied by CMake post-build; verify/copy).
           $ortDll = Join-Path $env:ORT_ROOT "lib/onnxruntime.dll"
-          if (Test-Path $ortDll) {
-            Copy-Item -Path $ortDll -Destination "package/" -Force
-          }
-          # cudnn DLLs (shipped with the ORT GPU package).
-          $cudnnDlls = Get-ChildItem -Path (Join-Path $env:ORT_ROOT "lib/cudnn*.dll") -ErrorAction SilentlyContinue
-          foreach ($d in $cudnnDlls) { Copy-Item -Path $d.FullName -Destination "package/" -Force }
+          if (Test-Path $ortDll) { Copy-Item -Path $ortDll -Destination "package/" -Force }
+          # cudnn DLLs bundled with the ORT GPU package.
+          Get-ChildItem -Path (Join-Path $env:ORT_ROOT "lib/cudnn*.dll") -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item -Path $_.FullName -Destination "package/" -Force }
 
-          # TensorRT runtime DLLs.
-          $trtDlls = Get-ChildItem -Path (Join-Path $env:TRT_ROOT "lib/nvinfer*.dll") -ErrorAction SilentlyContinue
-          foreach ($d in $trtDlls) { Copy-Item -Path $d.FullName -Destination "package/" -Force }
+          # TensorRT runtime DLLs (nvinfer_10.dll, nvinfer_plugin_10.dll, ...).
+          Get-ChildItem -Path (Join-Path $env:TRT_ROOT "lib/nvinfer*.dll") -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item -Path $_.FullName -Destination "package/" -Force }
 
-          # CUDA runtime DLLs (cudart, cublas, etc.).
+          # CUDA runtime DLLs (cudart, cublas, cudnn, ...).
           $cudaBin = Join-Path $env:CUDA_PATH "bin"
           $cudaDlls = @(
-            "cudart64_12.dll", "cublas64_12.dll", "cublasLt64_12.dll",
-            "cufft64_11.dll", "curand64_10.dll", "cusolver64_11.dll",
-            "cusparse64_12.dll", "cudnn64_9.dll", "cudnn_graph64_9.dll",
-            "cudnn_engines_precompiled64_9.dll", "cudnn_heuristic64_9.dll",
-            "cudnn_ops64_9.dll", "cudnn_adv64_9.dll"
+            "cudart64_12.dll","cublas64_12.dll","cublasLt64_12.dll","cufft64_11.dll",
+            "curand64_10.dll","cusolver64_11.dll","cusparse64_12.dll",
+            "cudnn64_9.dll","cudnn_graph64_9.dll","cudnn_engines_precompiled64_9.dll",
+            "cudnn_heuristic64_9.dll","cudnn_ops64_9.dll","cudnn_adv64_9.dll"
           )
           foreach ($dll in $cudaDlls) {
             $p = Join-Path $cudaBin $dll
             if (Test-Path $p) { Copy-Item -Path $p -Destination "package/" -Force }
           }
 
-          # Optional launch helper script.
+          # Launch helper.
           @"
           @echo off
           setlocal
@@ -143,30 +140,29 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build wget unzip
+          sudo apt-get install -y build-essential cmake ninja-build wget unzip python3-pip
 
-      - name: Setup CUDA Toolkit
-        uses: Jimver/cuda-toolkit@v0.2.21
+      - name: Setup CUDA
+        uses: Jimver/cuda-toolkit@v0.2.35
         with:
-          cuda: ${{ env.CUDA_VERSION }}
-          method: network
+          cuda: '12.8.0'
+          use-github-cache: true
 
       - name: Download ONNX Runtime (GPU/CUDA 12, contains TensorRT EP)
         run: |
           url="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-gpu-${ORT_VERSION}.tgz"
           wget -q -O ort.tgz "$url"
           mkdir -p ort && tar xzf ort.tgz -C ort --strip-components=1
-          # ort/ now has include/ and lib/ directly.
           echo "ORT_ROOT=$PWD/ort" >> $GITHUB_ENV
           ls -la ort/lib/
 
-      - name: Download TensorRT
+      - name: Get TensorRT runtime libs (via PyPI wheel, no EULA needed)
         run: |
-          trtUrl="https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.7.0/TensorRT-10.7.0.23.Linux.x86_64-gnu.cuda-12.6.tar.gz"
-          wget -q -O trt.tgz "$trtUrl"
-          mkdir -p trt && tar xzf trt.tgz -C trt --strip-components=1
-          echo "TRT_ROOT=$PWD/trt" >> $GITHUB_ENV
-          ls -la trt/lib/
+          pip download ${{ env.TRT_PIP_SPEC }} --no-deps --only-binary :all: -d trt_wheel
+          whl=$(ls trt_wheel/tensorrt-*.whl | head -1)
+          unzip -q "$whl" -d trt_extract
+          echo "TRT_ROOT=$PWD/trt_extract/tensorrt" >> $GITHUB_ENV
+          echo "TensorRT runtime libs:"; ls -la trt_extract/tensorrt/lib/
 
       - name: Configure CMake
         run: |
@@ -182,13 +178,13 @@ jobs:
       - name: Prepare Package
         run: |
           mkdir -p package
+          # hifishifter binary only — models are user-supplied.
           cp build/hifishifter package/
-          cp -R build/models package/
 
-          # ONNXRuntime shared library.
+          # ONNXRuntime shared library (+ symlinks).
           cp ${ORT_ROOT}/lib/libonnxruntime.so* package/
 
-          # TensorRT runtime libs.
+          # TensorRT runtime libs (libnvinfer.so.10*, libnvinfer_plugin.so.10*).
           cp ${TRT_ROOT}/lib/libnvinfer.so* package/ 2>/dev/null || true
           cp ${TRT_ROOT}/lib/libnvinfer_plugin.so* package/ 2>/dev/null || true
 
@@ -202,7 +198,8 @@ jobs:
             done
           done
 
-          # cuDNN (not strictly required for TensorRT EP, but commonly bundled).
+          # cuDNN (search common locations; not strictly required for TRT EP
+          # but commonly needed by ORT CUDA EP).
           for lib in libcudnn.so libcudnn_graph.so libcudnn_ops.so \
                       libcudnn_engines_precompiled.so libcudnn_heuristic.so \
                       libcudnn_adv.so; do
