@@ -1,15 +1,16 @@
 name: Build hifishifter
 
-# 模仿 HachiTune 的 CI 流水线。生成 TensorRT 版的 Windows x64 与 Linux x64
-# 分发包：动态链接 ONNXRuntime GPU 包（内置 TensorRT EP），并把所有运行时
-# 依赖（ORT / TensorRT / CUDA runtime）打包到与 hifishifter 可执行文件同一
+# 模仿 HachiTune 的 CI 流水线。生成 CUDA EP 版的 Windows x64 与 Linux x64
+# 分发包：动态链接 ONNXRuntime GPU 包（内置 CUDA EP），并把所有运行时
+# 依赖（ORT / CUDA runtime / cuDNN）打包到与 hifishifter 可执行文件同一
 # 目录，得到开箱即用的二进制分发包。
 #
 # models 目录不入仓库、不打包 —— 用户自行置入到二进制旁的 models/ 子目录。
 #
-# 说明：真正的"单一二进制静态文件"在 TensorRT 场景下不可行 —— TensorRT
-# 本身只以共享库形式发布（libnvinfer.so / nvinfer_10.dll），无法静态链接。
-# 因此本流水线采用与 HachiTune 相同的"动态链接 + 同目录打包"方案。
+# 说明：真正的"单一二进制静态文件"在 GPU 加速场景下不可行 —— CUDA/cuDNN
+# 运行时只以共享库形式发布。因此采用与 HachiTune 相同的"动态链接 + 同目录
+# 打包"方案。TensorRT EP 因其运行时库在 CI 上无可靠下载源而改用 CUDA EP
+# （ORT GPU 包内置，无需额外下载）。
 
 on:
   push:
@@ -23,18 +24,14 @@ on:
 env:
   BUILD_TYPE: Release
   ORT_VERSION: "1.20.1"
-  # ORT 1.20.x 的 TensorRT EP 动态加载 nvinfer 10.x 运行时库。
-  # tensorrt-cu12 is NVIDIA's official PyPI package for TensorRT 10+ runtime
-  # libs (libnvinfer / nvinfer_10.dll). No EULA, no login required.
-  TRT_PIP_SPEC: "tensorrt-cu12==10.7.0"
 
 jobs:
   # ===========================================
-  # Windows x64 Build (TensorRT)
+  # Windows x64 Build (CUDA EP)
   # ===========================================
   build-windows:
     runs-on: windows-latest
-    name: Windows x64 (TensorRT)
+    name: Windows x64 (CUDA EP)
 
     steps:
       - name: Checkout
@@ -46,7 +43,7 @@ jobs:
           cuda: '12.8.0'
           use-github-cache: true
 
-      - name: Download ONNX Runtime (GPU/CUDA 12, contains TensorRT EP)
+      - name: Download ONNX Runtime (GPU/CUDA 12, contains CUDA EP)
         shell: pwsh
         run: |
           $url = "https://github.com/microsoft/onnxruntime/releases/download/v${{ env.ORT_VERSION }}/onnxruntime-win-x64-gpu-${{ env.ORT_VERSION }}.zip"
@@ -56,23 +53,12 @@ jobs:
           "ORT_ROOT=$ortRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
           Get-ChildItem $ortRoot/lib
 
-      - name: Get TensorRT runtime libs (via PyPI wheel, no EULA needed)
-        shell: pwsh
-        run: |
-          pip download ${{ env.TRT_PIP_SPEC }} --no-deps --only-binary :all: -d trt_wheel
-          $whl = (Get-ChildItem trt_wheel/tensorrt-*.whl | Select-Object -First 1).FullName
-          # .whl is a zip; extract the tensorrt/lib runtime DLLs.
-          Expand-Archive -Path $whl -DestinationPath trt_extract -Force
-          $trtRoot = "$env:GITHUB_WORKSPACE/trt_extract/tensorrt"
-          "TRT_ROOT=$trtRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "TensorRT runtime libs:"; Get-ChildItem $trtRoot/lib
-
       - name: Configure CMake
         shell: pwsh
         run: |
           cmake -B build -G "Ninja" `
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
-            -DUSE_TENSORRT=ON `
+            -DUSE_TENSORRT=OFF `
             -DSTATIC_LINK=OFF `
             -DORT_ROOT="$env:ORT_ROOT"
 
@@ -86,31 +72,25 @@ jobs:
           # hifishifter binary only — models are user-supplied.
           Copy-Item -Path "build/hifishifter.exe" -Destination "package/" -Force
 
-          # ONNXRuntime DLL (auto-copied by CMake post-build; verify/copy).
+          # ONNXRuntime DLL.
           $ortDll = Join-Path $env:ORT_ROOT "lib/onnxruntime.dll"
           if (Test-Path $ortDll) { Copy-Item -Path $ortDll -Destination "package/" -Force }
-          # cudnn DLLs bundled with the ORT GPU package.
+          # cuDNN DLLs bundled with the ORT GPU package (needed by CUDA EP).
           Get-ChildItem -Path (Join-Path $env:ORT_ROOT "lib/cudnn*.dll") -ErrorAction SilentlyContinue |
             ForEach-Object { Copy-Item -Path $_.FullName -Destination "package/" -Force }
 
-          # TensorRT runtime DLLs (nvinfer_10.dll, nvinfer_plugin_10.dll, ...).
-          Get-ChildItem -Path (Join-Path $env:TRT_ROOT "lib/nvinfer*.dll") -ErrorAction SilentlyContinue |
-            ForEach-Object { Copy-Item -Path $_.FullName -Destination "package/" -Force }
-
-          # CUDA runtime DLLs (cudart, cublas, cudnn, ...).
+          # CUDA runtime DLLs (cudart, cublas, cufft, ...).
           $cudaBin = Join-Path $env:CUDA_PATH "bin"
           $cudaDlls = @(
             "cudart64_12.dll","cublas64_12.dll","cublasLt64_12.dll","cufft64_11.dll",
-            "curand64_10.dll","cusolver64_11.dll","cusparse64_12.dll",
-            "cudnn64_9.dll","cudnn_graph64_9.dll","cudnn_engines_precompiled64_9.dll",
-            "cudnn_heuristic64_9.dll","cudnn_ops64_9.dll","cudnn_adv64_9.dll"
+            "curand64_10.dll","cusolver64_11.dll","cusparse64_12.dll"
           )
           foreach ($dll in $cudaDlls) {
             $p = Join-Path $cudaBin $dll
             if (Test-Path $p) { Copy-Item -Path $p -Destination "package/" -Force }
           }
 
-          # Launch helper.
+          # Launch helper: prepends the package dir to PATH so the DLLs resolve.
           @"
           @echo off
           setlocal
@@ -129,11 +109,11 @@ jobs:
           retention-days: 30
 
   # ===========================================
-  # Linux x64 Build (TensorRT)
+  # Linux x64 Build (CUDA EP)
   # ===========================================
   build-linux:
     runs-on: ubuntu-22.04
-    name: Linux x64 (TensorRT)
+    name: Linux x64 (CUDA EP)
 
     steps:
       - name: Checkout
@@ -142,7 +122,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build wget unzip python3-pip
+          sudo apt-get install -y build-essential cmake ninja-build wget unzip
 
       - name: Setup CUDA
         uses: Jimver/cuda-toolkit@v0.2.35
@@ -150,7 +130,7 @@ jobs:
           cuda: '12.8.0'
           use-github-cache: true
 
-      - name: Download ONNX Runtime (GPU/CUDA 12, contains TensorRT EP)
+      - name: Download ONNX Runtime (GPU/CUDA 12, contains CUDA EP)
         run: |
           url="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-gpu-${ORT_VERSION}.tgz"
           wget -q -O ort.tgz "$url"
@@ -158,19 +138,11 @@ jobs:
           echo "ORT_ROOT=$PWD/ort" >> $GITHUB_ENV
           ls -la ort/lib/
 
-      - name: Get TensorRT runtime libs (via PyPI wheel, no EULA needed)
-        run: |
-          pip download ${{ env.TRT_PIP_SPEC }} --no-deps --only-binary :all: -d trt_wheel
-          whl=$(ls trt_wheel/tensorrt-*.whl | head -1)
-          unzip -q "$whl" -d trt_extract
-          echo "TRT_ROOT=$PWD/trt_extract/tensorrt" >> $GITHUB_ENV
-          echo "TensorRT runtime libs:"; ls -la trt_extract/tensorrt/lib/
-
       - name: Configure CMake
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
-            -DUSE_TENSORRT=ON \
+            -DUSE_TENSORRT=OFF \
             -DSTATIC_LINK=OFF \
             -DORT_ROOT="${ORT_ROOT}"
 
@@ -183,12 +155,11 @@ jobs:
           # hifishifter binary only — models are user-supplied.
           cp build/hifishifter package/
 
-          # ONNXRuntime shared library (+ symlinks).
-          cp ${ORT_ROOT}/lib/libonnxruntime.so* package/
+          # ONNXRuntime shared library (+ soname symlinks).
+          cp -L ${ORT_ROOT}/lib/libonnxruntime.so* package/
 
-          # TensorRT runtime libs (libnvinfer.so.10*, libnvinfer_plugin.so.10*).
-          cp ${TRT_ROOT}/lib/libnvinfer.so* package/ 2>/dev/null || true
-          cp ${TRT_ROOT}/lib/libnvinfer_plugin.so* package/ 2>/dev/null || true
+          # cuDNN shared libs bundled with the ORT GPU package (needed by CUDA EP).
+          cp -L ${ORT_ROOT}/lib/libcudnn*.so* package/ 2>/dev/null || true
 
           # CUDA runtime libs.
           CUDA_LIB=${CUDA_PATH}/lib64
@@ -196,17 +167,7 @@ jobs:
           for lib in libcudart.so libcublas.so libcublasLt.so libcufft.so \
                       libcurand.so libcusolver.so libcusparse.so; do
             for f in $(ls $CUDA_LIB/${lib}* 2>/dev/null); do
-              cp $f package/ 2>/dev/null || true
-            done
-          done
-
-          # cuDNN (search common locations; not strictly required for TRT EP
-          # but commonly needed by ORT CUDA EP).
-          for lib in libcudnn.so libcudnn_graph.so libcudnn_ops.so \
-                      libcudnn_engines_precompiled.so libcudnn_heuristic.so \
-                      libcudnn_adv.so; do
-            for f in $(find / -name "${lib}*" 2>/dev/null | head -1); do
-              cp $f package/ 2>/dev/null || true
+              cp -L $f package/ 2>/dev/null || true
             done
           done
 
