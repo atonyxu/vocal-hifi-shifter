@@ -24,7 +24,9 @@ env:
   BUILD_TYPE: Release
   ORT_VERSION: "1.20.1"
   # ORT 1.20.x 的 TensorRT EP 动态加载 nvinfer 10.x 运行时库。
-  TRT_PIP_SPEC: "tensorrt==10.7.0"
+  # tensorrt-cu12 is NVIDIA's official PyPI package for TensorRT 10+ runtime
+  # libs (libnvinfer / nvinfer_10.dll). No EULA, no login required.
+  TRT_PIP_SPEC: "tensorrt-cu12==10.7.0"
 
 jobs:
   # ===========================================
